@@ -104,3 +104,5 @@ ENV/
 .Trashes
 ehthumbs.db
 Thumbs.db
+*.hprof
+local.properties

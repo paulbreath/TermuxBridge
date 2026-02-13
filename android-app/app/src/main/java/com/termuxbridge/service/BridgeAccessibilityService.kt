@@ -17,12 +17,12 @@ import org.json.JSONObject
 class BridgeAccessibilityService : AccessibilityService() {
     
     companion object {
+        @JvmStatic
         var instance: BridgeAccessibilityService? = null
             private set
         
+        @JvmStatic
         fun isServiceEnabled(): Boolean = instance != null
-        
-        fun getInstance(): BridgeAccessibilityService? = instance
     }
     
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())

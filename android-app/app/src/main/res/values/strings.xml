@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">Termux Bridge</string>
-    <string name="accessibility_service_description">Termux Bridge 无障碍服务允许 Termux 终端通过 HTTP API 控制您的设备。此服务可以：\n\n• 模拟点击、滑动、长按等手势操作\n• 获取当前界面的元素信息\n• 向输入框输入文本\n• 执行返回、Home、最近任务等全局操作\n\n请仅在您信任此应用的情况下启用此服务。</string>
+    <string name="accessibility_service_label">Termux Bridge</string>
+    <string name="accessibility_service_description">Termux Bridge 无障碍服务允许 Termux 终端通过 HTTP API 控制您的设备。\n\n此服务可以：\n• 模拟点击、滑动、长按等手势操作\n• 获取当前界面的元素信息\n• 向输入框输入文本\n• 执行返回、Home、最近任务等全局操作\n\n请仅在您信任此应用的情况下启用此服务。</string>
 </resources>

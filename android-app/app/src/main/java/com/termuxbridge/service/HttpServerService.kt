@@ -194,7 +194,7 @@ class HttpServerService : Service() {
             val json = JSONObject(body)
             val command = ExecuteCommand.fromJson(json)
             
-            val service = BridgeAccessibilityService.getInstance()
+            val service = BridgeAccessibilityService.instance
             
             if (service == null) {
                 return Response(503, mapOf(
@@ -226,7 +226,7 @@ class HttpServerService : Service() {
             val json = if (body.isNotEmpty()) JSONObject(body) else JSONObject()
             val command = ExecuteCommand(elementPath, json)
             
-            val service = BridgeAccessibilityService.getInstance()
+            val service = BridgeAccessibilityService.instance
             
             if (service == null) {
                 return Response(503, mapOf(
