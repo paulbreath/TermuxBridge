@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TermuxBridge" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#1F4E79</item>
+        <item name="android:colorPrimaryDark">#14375C</item>
+        <item name="android:colorAccent">#2E75B6</item>
+        <item name="android:statusBarColor">#14375C</item>
+        <item name="android:navigationBarColor">#14375C</item>
+    </style>
+</resources>
