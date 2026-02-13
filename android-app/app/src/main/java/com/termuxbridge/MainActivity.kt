@@ -1,13 +1,13 @@
 package com.termuxbridge
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -30,11 +30,18 @@ class MainActivity : ComponentActivity() {
     
     private var serverRunning = mutableStateOf(false)
     private var accessibilityEnabled = mutableStateOf(false)
+    private var overlayPermissionGranted = mutableStateOf(false)
     private var serverPort = mutableStateOf(8080)
     private var statusMessage = mutableStateOf("")
     
+    private val overlayPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        checkOverlayPermission()
+    }
+    
     private val accessibilityLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
     ) { _ ->
         checkAccessibilityStatus()
     }
@@ -42,6 +49,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // 检查所有权限状态
+        checkOverlayPermission()
         checkAccessibilityStatus()
         checkServerStatus()
         
@@ -50,8 +59,10 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     accessibilityEnabled = accessibilityEnabled.value,
                     serverRunning = serverRunning.value,
+                    overlayPermissionGranted = overlayPermissionGranted.value,
                     serverPort = serverPort.value,
                     statusMessage = statusMessage.value,
+                    onRequestOverlayPermission = { requestOverlayPermission() },
                     onEnableAccessibility = { openAccessibilitySettings() },
                     onStartServer = { startHttpServer() },
                     onStopServer = { stopHttpServer() },
@@ -63,12 +74,30 @@ class MainActivity : ComponentActivity() {
     
     override fun onResume() {
         super.onResume()
+        checkOverlayPermission()
         checkAccessibilityStatus()
         checkServerStatus()
     }
     
+    private fun checkOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            overlayPermissionGranted.value = Settings.canDrawOverlays(this)
+        } else {
+            overlayPermissionGranted.value = true
+        }
+    }
+    
+    private fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            overlayPermissionLauncher.launch(intent)
+        }
+    }
+    
     private fun checkAccessibilityStatus() {
-        val am = getSystemService(ACCESSIBILITY_SERVICE) as AccessibilityManager
         val enabledServices = Settings.Secure.getString(
             contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
@@ -128,7 +157,6 @@ class MainActivity : ComponentActivity() {
                 connection.connectTimeout = 3000
                 connection.readTimeout = 3000
                 
-                val responseCode = connection.responseCode
                 val response = connection.inputStream.bufferedReader().readText()
                 
                 runOnUiThread {
@@ -148,8 +176,10 @@ class MainActivity : ComponentActivity() {
 fun MainScreen(
     accessibilityEnabled: Boolean,
     serverRunning: Boolean,
+    overlayPermissionGranted: Boolean,
     serverPort: Int,
     statusMessage: String,
+    onRequestOverlayPermission: () -> Unit,
     onEnableAccessibility: () -> Unit,
     onStartServer: () -> Unit,
     onStopServer: () -> Unit,
@@ -179,7 +209,7 @@ fun MainScreen(
                 .padding(padding)
                 .padding(16.dp)
                 .verticalScroll(scrollState),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 状态卡片
             StatusCard(
@@ -188,6 +218,43 @@ fun MainScreen(
                 serverPort = serverPort
             )
             
+            // 悬浮窗权限（关键！）
+            if (!overlayPermissionGranted) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFFFFF3E0)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "⚠️ 悬浮窗权限（必须）",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE65100)
+                        )
+                        Text(
+                            "此权限是启用无障碍服务的前提条件",
+                            fontSize = 12.sp,
+                            color = Color(0xFFE65100)
+                        )
+                        Button(
+                            onClick = onRequestOverlayPermission,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFE65100)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("授权悬浮窗权限")
+                        }
+                    }
+                }
+            }
+            
             // 无障碍服务设置
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -195,11 +262,11 @@ fun MainScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
                         "无障碍服务",
-                        fontSize = 18.sp,
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
                     
@@ -209,12 +276,13 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            if (accessibilityEnabled) "已启用" else "未启用",
+                            if (accessibilityEnabled) "✓ 已启用" else "✗ 未启用",
                             color = if (accessibilityEnabled) Color(0xFF4CAF50) else Color(0xFFF44336)
                         )
                         
                         Button(
                             onClick = onEnableAccessibility,
+                            enabled = overlayPermissionGranted,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (accessibilityEnabled) 
                                     MaterialTheme.colorScheme.secondary 
@@ -226,11 +294,13 @@ fun MainScreen(
                         }
                     }
                     
-                    Text(
-                        "注意：需要在系统设置中启用 Termux Bridge 的无障碍服务",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (!overlayPermissionGranted) {
+                        Text(
+                            "⚠️ 请先授权悬浮窗权限",
+                            fontSize = 12.sp,
+                            color = Color(0xFFE65100)
+                        )
+                    }
                 }
             }
             
@@ -241,11 +311,11 @@ fun MainScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
                         "HTTP服务器",
-                        fontSize = 18.sp,
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
                     
@@ -256,23 +326,21 @@ fun MainScreen(
                     ) {
                         Text("端口: $serverPort")
                         
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (serverRunning) {
-                                Button(
-                                    onClick = onStopServer,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFFF44336)
-                                    )
-                                ) {
-                                    Text("停止")
-                                }
-                            } else {
-                                Button(
-                                    onClick = onStartServer,
-                                    enabled = accessibilityEnabled
-                                ) {
-                                    Text("启动")
-                                }
+                        if (serverRunning) {
+                            Button(
+                                onClick = onStopServer,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF44336)
+                                )
+                            ) {
+                                Text("停止")
+                            }
+                        } else {
+                            Button(
+                                onClick = onStartServer,
+                                enabled = accessibilityEnabled
+                            ) {
+                                Text("启动")
                             }
                         }
                     }
@@ -283,43 +351,6 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("测试连接")
-                    }
-                }
-            }
-            
-            // 使用说明
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        "使用说明",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    
-                    val instructions = listOf(
-                        "1. 点击【启用服务】打开无障碍设置",
-                        "2. 找到 Termux Bridge 并启用",
-                        "3. 返回应用，点击【启动】按钮",
-                        "4. 在Termux中使用命令控制手机",
-                        "",
-                        "示例命令：",
-                        "curl -X POST http://127.0.0.1:8080/cmd \\",
-                        "  -H 'Content-Type: application/json' \\",
-                        "  -d '{\"action\":\"tap\",\"x\":540,\"y\":960}'"
-                    )
-                    
-                    instructions.forEach { line ->
-                        Text(
-                            line,
-                            fontSize = 13.sp,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                        )
                     }
                 }
             }
@@ -340,54 +371,37 @@ fun MainScreen(
                 }
             }
             
-            // 命令参考
+            // 安装步骤
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        "命令参考",
-                        fontSize = 18.sp,
+                        "安装步骤",
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
                     
-                    val commands = listOf(
-                        Pair("tap", "点击坐标 {x, y}"),
-                        Pair("tap_element", "点击元素 {text/resourceId}"),
-                        Pair("swipe", "滑动 {startX, startY, endX, endY, duration}"),
-                        Pair("input_text", "输入文本 {text}"),
-                        Pair("key", "按键事件 {keyCode}"),
-                        Pair("find_element", "查找元素 {text}"),
-                        Pair("dump", "获取界面结构"),
-                        Pair("screenshot", "截图(需额外权限)")
+                    val steps = listOf(
+                        "1. 点击「授权悬浮窗权限」按钮",
+                        "2. 在设置页面开启权限",
+                        "3. 返回应用，点击「启用服务」",
+                        "4. 在无障碍设置中找到 Termux Bridge",
+                        "5. 开启开关并确认",
+                        "6. 返回应用，启动HTTP服务器"
                     )
                     
-                    commands.forEach { (cmd, desc) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                cmd,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                modifier = Modifier.weight(0.3f)
-                            )
-                            Text(
-                                desc,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(0.7f)
-                            )
-                        }
+                    steps.forEach { step ->
+                        Text(step, fontSize = 13.sp)
                     }
                 }
             }
             
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }
@@ -398,13 +412,12 @@ fun StatusCard(
     serverRunning: Boolean,
     serverPort: Int
 ) {
+    val isReady = accessibilityEnabled && serverRunning
+    
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (accessibilityEnabled && serverRunning) 
-                Color(0xFFE8F5E9) 
-            else 
-                Color(0xFFFFEBEE)
+            containerColor = if (isReady) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
     ) {
@@ -417,30 +430,30 @@ fun StatusCard(
         ) {
             Column {
                 Text(
-                    text = if (accessibilityEnabled && serverRunning) "服务运行中" else "服务未就绪",
-                    fontSize = 20.sp,
+                    text = if (isReady) "服务运行中" else "服务未就绪",
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     text = "http://127.0.0.1:$serverPort",
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(44.dp)
                     .background(
-                        if (accessibilityEnabled && serverRunning) Color(0xFF4CAF50) else Color(0xFFF44336),
-                        RoundedCornerShape(24.dp)
+                        if (isReady) Color(0xFF4CAF50) else Color(0xFFF44336),
+                        RoundedCornerShape(22.dp)
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (accessibilityEnabled && serverRunning) "✓" else "✗",
+                    text = if (isReady) "✓" else "✗",
                     color = Color.White,
-                    fontSize = 24.sp,
+                    fontSize = 22.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
