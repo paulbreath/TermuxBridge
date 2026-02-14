@@ -3,6 +3,8 @@ package com.termuxbridge.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.app.KeyguardManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Path
@@ -232,6 +234,8 @@ class BridgeAccessibilityService : AccessibilityService() {
             "swipe" -> executeSwipe(command)
             "long_press" -> executeLongPress(command)
             "input_text" -> executeInputText(command)
+            "input_paste" -> executeInputPaste(command)
+            "input_keyboard" -> executeInputKeyboard(command)
             "key" -> executeKeyEvent(command)
             "find_element" -> executeFindElement(command)
             "dump" -> executeDumpHierarchy()
@@ -352,10 +356,12 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * Input text
+     * Input text - Enhanced version with focus handling
+     * Inspired by browser-use's approach: focus first, then input
      */
     private fun executeInputText(command: ExecuteCommand): CommandResult {
         val text = command.params.optString("text", "")
+        val useFocus = command.params.optBoolean("focus", true)
         
         val rootNode = getRootNode() 
             ?: return CommandResult.error("No active window - ${diagnoseNoWindow()}")
@@ -367,6 +373,17 @@ class BridgeAccessibilityService : AccessibilityService() {
             return CommandResult.error("No focusable node found")
         }
         
+        // Step 1: Focus the element first (inspired by browser-use)
+        if (useFocus) {
+            val focusResult = focusAndClickNode(focusNode)
+            if (!focusResult.success) {
+                Log.w(TAG, "Focus attempt failed, trying direct input anyway")
+            }
+            // Small delay to let focus take effect
+            Thread.sleep(100)
+        }
+        
+        // Step 2: Set text directly
         val arguments = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
@@ -377,6 +394,163 @@ class BridgeAccessibilityService : AccessibilityService() {
             CommandResult.success("Text input: $text")
         } else {
             CommandResult.error("Failed to input text")
+        }
+    }
+    
+    /**
+     * Input text using clipboard paste
+     * This method works with the system input method
+     */
+    private fun executeInputPaste(command: ExecuteCommand): CommandResult {
+        val text = command.params.optString("text", "")
+        val clearFirst = command.params.optBoolean("clear", true)
+        
+        val rootNode = getRootNode() 
+            ?: return CommandResult.error("No active window - ${diagnoseNoWindow()}")
+        
+        // Find focusable editable node
+        val focusNode = findFocusableNode(rootNode)
+        
+        if (focusNode == null) {
+            return CommandResult.error("No focusable node found")
+        }
+        
+        // Step 1: Focus and click the element
+        val focusResult = focusAndClickNode(focusNode)
+        if (!focusResult.success) {
+            Log.w(TAG, "Focus attempt had issues: ${focusResult.message}")
+        }
+        
+        // Wait for focus and keyboard to appear
+        Thread.sleep(200)
+        
+        // Step 2: Clear existing text if requested
+        if (clearFirst) {
+            // Select all and delete
+            focusNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            Thread.sleep(50)
+            
+            // Try to select all
+            val selectAllArgs = Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, Int.MAX_VALUE)
+            }
+            focusNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selectAllArgs)
+            Thread.sleep(50)
+            
+            // Delete selection
+            focusNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        }
+        
+        // Step 3: Copy text to clipboard
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = ClipData.newPlainText("TermuxBridge", text)
+        clipboard.setPrimaryClip(clip)
+        
+        // Wait for clipboard to be ready
+        Thread.sleep(100)
+        
+        // Step 4: Simulate paste (Ctrl+V or via accessibility)
+        val pasteResult = focusNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        
+        return if (pasteResult) {
+            CommandResult.success("Text pasted via clipboard: $text")
+        } else {
+            // Fallback: Try direct set text
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            val fallbackResult = focusNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            
+            if (fallbackResult) {
+                CommandResult.success("Text input (fallback): $text")
+            } else {
+                CommandResult.error("Failed to input text via paste or fallback")
+            }
+        }
+    }
+    
+    /**
+     * Input text by simulating keyboard typing
+     * Character by character input that works with input methods
+     */
+    private fun executeInputKeyboard(command: ExecuteCommand): CommandResult {
+        val text = command.params.optString("text", "")
+        val delay = command.params.optLong("delay", 50) // ms between keystrokes
+        
+        val rootNode = getRootNode() 
+            ?: return CommandResult.error("No active window - ${diagnoseNoWindow()}")
+        
+        // Find focusable editable node
+        val focusNode = findFocusableNode(rootNode)
+        
+        if (focusNode == null) {
+            return CommandResult.error("No focusable node found")
+        }
+        
+        // Step 1: Focus and click the element
+        focusAndClickNode(focusNode)
+        Thread.sleep(200)
+        
+        // Step 2: Clear existing text
+        val clearArgs = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+        }
+        focusNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+        Thread.sleep(100)
+        
+        // Step 3: Type each character
+        // Note: This uses ACTION_SET_TEXT incrementally as true keyboard simulation
+        // requires additional Android APIs not available in accessibility service
+        
+        var currentText = ""
+        for (char in text) {
+            currentText += char
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, currentText)
+            }
+            focusNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            Thread.sleep(delay)
+        }
+        
+        return CommandResult.success("Text typed character by character: $text")
+    }
+    
+    /**
+     * Focus and click a node to prepare for input
+     * Inspired by browser-use's focus handling
+     */
+    private fun focusAndClickNode(node: AccessibilityNodeInfo): CommandResult {
+        // Method 1: Try ACTION_FOCUS
+        var focused = node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        
+        if (focused) {
+            Log.d(TAG, "Node focused via ACTION_FOCUS")
+            return CommandResult.success("Node focused")
+        }
+        
+        // Method 2: Click on the node to focus it
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        
+        val centerX = bounds.centerX().toFloat()
+        val centerY = bounds.centerY().toFloat()
+        
+        val path = Path().apply {
+            moveTo(centerX, centerY)
+        }
+        
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
+            .build()
+        
+        val clickResult = dispatchGestureSync(gesture)
+        
+        return if (clickResult.success) {
+            Log.d(TAG, "Node focused via click at ($centerX, $centerY)")
+            CommandResult.success("Node focused via click")
+        } else {
+            CommandResult.error("Failed to focus node")
         }
     }
     
