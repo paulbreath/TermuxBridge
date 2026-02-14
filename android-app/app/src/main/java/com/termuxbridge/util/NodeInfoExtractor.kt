@@ -1,17 +1,34 @@
 package com.termuxbridge.util
 
+import android.content.res.Resources
 import android.graphics.Rect
+import android.os.Build
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 节点信息提取工具
+ * Node Info Extractor - Enhanced Version
+ * 
+ * Added visibility detection inspired by browser-use's approach
+ * to provide better element visibility information.
  */
 object NodeInfoExtractor {
     
+    // Screen dimensions for visibility calculation
+    private var screenWidth: Int = 0
+    private var screenHeight: Int = 0
+    
     /**
-     * 提取单个节点的信息
+     * Initialize screen dimensions (should be called once)
+     */
+    fun initScreenDimensions(width: Int, height: Int) {
+        screenWidth = width
+        screenHeight = height
+    }
+    
+    /**
+     * Extract single node information
      */
     fun extract(node: AccessibilityNodeInfo): JSONObject {
         val bounds = Rect()
@@ -30,6 +47,8 @@ object NodeInfoExtractor {
                 put("bottom", bounds.bottom)
                 put("centerX", bounds.centerX())
                 put("centerY", bounds.centerY())
+                put("width", bounds.width())
+                put("height", bounds.height())
             })
             put("clickable", node.isClickable)
             put("scrollable", node.isScrollable)
@@ -41,20 +60,25 @@ object NodeInfoExtractor {
             put("checkable", node.isCheckable)
             put("selected", node.isSelected)
             put("childCount", node.childCount)
+            
+            // Add visibility information (inspired by browser-use)
+            put("isVisibleToUser", isNodeVisible(node))
+            put("isOnScreen", isNodeOnScreen(node, bounds))
         }
     }
     
     /**
-     * 提取整个界面层级结构
+     * Extract entire UI hierarchy with visibility detection
+     * Inspired by browser-use's enhanced DOM extraction
      */
-    fun extractHierarchy(node: AccessibilityNodeInfo, depth: Int = 0): JSONObject {
+    fun extractHierarchyWithVisibility(node: AccessibilityNodeInfo, depth: Int = 0): JSONObject {
         val nodeInfo = extract(node)
         val children = JSONArray()
         
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
             if (child != null) {
-                children.put(extractHierarchy(child, depth + 1))
+                children.put(extractHierarchyWithVisibility(child, depth + 1))
             }
         }
         
@@ -65,7 +89,53 @@ object NodeInfoExtractor {
     }
     
     /**
-     * 提取扁平化的节点列表
+     * Extract UI hierarchy (original method, kept for compatibility)
+     */
+    fun extractHierarchy(node: AccessibilityNodeInfo, depth: Int = 0): JSONObject {
+        return extractHierarchyWithVisibility(node, depth)
+    }
+    
+    /**
+     * Check if node is visible to user
+     * Inspired by browser-use's visibility detection approach
+     */
+    private fun isNodeVisible(node: AccessibilityNodeInfo): Boolean {
+        // Check basic visibility
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            if (!node.isVisibleToUser) return false
+        }
+        
+        // Check bounds
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        
+        return bounds.width() > 0 && bounds.height() > 0
+    }
+    
+    /**
+     * Check if node is currently on screen
+     */
+    private fun isNodeOnScreen(node: AccessibilityNodeInfo, bounds: Rect): Boolean {
+        // Get screen dimensions if not initialized
+        if (screenWidth == 0 || screenHeight == 0) {
+            try {
+                val displayMetrics = Resources.getSystem().displayMetrics
+                screenWidth = displayMetrics.widthPixels
+                screenHeight = displayMetrics.heightPixels
+            } catch (e: Exception) {
+                // Default to common resolution
+                screenWidth = 1080
+                screenHeight = 2400
+            }
+        }
+        
+        // Check if bounds intersect with screen
+        return bounds.left < screenWidth && bounds.right > 0 &&
+               bounds.top < screenHeight && bounds.bottom > 0
+    }
+    
+    /**
+     * Extract flat list of nodes
      */
     fun extractFlatList(node: AccessibilityNodeInfo, result: JSONArray = JSONArray()): JSONArray {
         val nodeInfo = extract(node)
@@ -82,7 +152,7 @@ object NodeInfoExtractor {
     }
     
     /**
-     * 查找可点击的元素
+     * Find clickable elements
      */
     fun findClickableNodes(node: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
         if (node.isClickable && node.isEnabled) {
@@ -100,7 +170,7 @@ object NodeInfoExtractor {
     }
     
     /**
-     * 查找可编辑的元素
+     * Find editable elements
      */
     fun findEditableNodes(node: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
         if (node.isEditable && node.isEnabled) {
@@ -118,7 +188,31 @@ object NodeInfoExtractor {
     }
     
     /**
-     * 获取节点的简要描述
+     * Find visible interactive elements (inspired by browser-use)
+     */
+    fun findVisibleInteractiveNodes(
+        node: AccessibilityNodeInfo, 
+        result: MutableList<AccessibilityNodeInfo> = mutableListOf()
+    ): List<AccessibilityNodeInfo> {
+        val isInteractive = node.isClickable || node.isScrollable || 
+                           node.isEditable || node.isCheckable
+        
+        if (isInteractive && node.isEnabled && isNodeVisible(node)) {
+            result.add(node)
+        }
+        
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                findVisibleInteractiveNodes(child, result)
+            }
+        }
+        
+        return result
+    }
+    
+    /**
+     * Get brief description of node
      */
     fun getBriefDescription(node: AccessibilityNodeInfo): String {
         val className = node.className?.toString()?.substringAfterLast('.') ?: "Unknown"
@@ -130,5 +224,45 @@ object NodeInfoExtractor {
             if (text.isNotEmpty()) append(" [\"$text\"]")
             if (resourceId.isNotEmpty()) append(" #$resourceId")
         }
+    }
+    
+    /**
+     * Count total nodes in hierarchy
+     */
+    fun countNodes(node: AccessibilityNodeInfo): Int {
+        var count = 1
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                count += countNodes(child)
+            }
+        }
+        return count
+    }
+    
+    /**
+     * Extract interactive elements as simplified list
+     * Returns only essential info for quick access
+     */
+    fun extractInteractiveElements(node: AccessibilityNodeInfo): JSONArray {
+        val result = JSONArray()
+        val interactiveNodes = findVisibleInteractiveNodes(node)
+        
+        for (nodeInfo in interactiveNodes) {
+            val bounds = Rect()
+            nodeInfo.getBoundsInScreen(bounds)
+            
+            result.put(JSONObject().apply {
+                put("className", nodeInfo.className?.toString()?.substringAfterLast('.') ?: "")
+                put("text", nodeInfo.text?.toString() ?: "")
+                put("resourceId", nodeInfo.viewIdResourceName ?: "")
+                put("centerX", bounds.centerX())
+                put("centerY", bounds.centerY())
+                put("clickable", nodeInfo.isClickable)
+                put("editable", nodeInfo.isEditable)
+            })
+        }
+        
+        return result
     }
 }
