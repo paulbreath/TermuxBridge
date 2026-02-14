@@ -2,27 +2,45 @@ package com.termuxbridge.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.termuxbridge.model.CommandResult
 import com.termuxbridge.model.ExecuteCommand
 import com.termuxbridge.util.NodeInfoExtractor
 import kotlinx.coroutines.*
 import org.json.JSONObject
 
+/**
+ * Bridge Accessibility Service - Enhanced Version
+ * 
+ * Fixes "No active window" issue with multiple fallback strategies,
+ * inspired by browser-use's multi-data-source approach.
+ */
 class BridgeAccessibilityService : AccessibilityService() {
     
     companion object {
+        private const val TAG = "TermuxBridge"
+        private const val CACHE_VALIDITY_MS = 5000L // 5 seconds cache validity
+        
         @JvmStatic
         var instance: BridgeAccessibilityService? = null
             private set
         
         @JvmStatic
         fun isServiceEnabled(): Boolean = instance != null
+        
+        // Cache for last known root node (inspired by browser-use's caching strategy)
+        private var lastKnownRootNode: AccessibilityNodeInfo? = null
+        private var lastUpdateTime: Long = 0
     }
     
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -30,24 +48,182 @@ class BridgeAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        
+        // Log service capabilities for debugging
+        logServiceCapabilities()
+    }
+    
+    /**
+     * Log service capabilities for debugging
+     */
+    private fun logServiceCapabilities() {
+        try {
+            val rootNode = rootInActiveWindow
+            val windowCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                windows.size
+            } else 0
+            
+            Log.d(TAG, """
+                |Service Connected:
+                |  - rootInActiveWindow: ${if (rootNode != null) "available" else "null"}
+                |  - Window count: $windowCount
+                |  - SDK: ${Build.VERSION.SDK_INT}
+            """.trimMargin())
+        } catch (e: Exception) {
+            Log.e(TAG, "Service capability check failed: ${e.message}")
+        }
     }
     
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 可以在这里监听界面变化事件
+        event?.let {
+            // Update cache on window changes (inspired by browser-use's event-driven updates)
+            when (it.eventType) {
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                    updateCache()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Update cached root node
+     */
+    private fun updateCache() {
+        try {
+            val rootNode = rootInActiveWindow
+            if (rootNode != null) {
+                lastKnownRootNode = rootNode
+                lastUpdateTime = System.currentTimeMillis()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update cache: ${e.message}")
+        }
     }
     
     override fun onInterrupt() {
-        // 处理中断
+        // Handle interruption
     }
     
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+        lastKnownRootNode = null
         serviceScope.cancel()
     }
     
     /**
-     * 执行命令
+     * Get root node with multiple fallback strategies
+     * Inspired by browser-use's multi-data-source approach
+     */
+    private fun getRootNode(): AccessibilityNodeInfo? {
+        // Strategy 1: Direct rootInActiveWindow
+        rootInActiveWindow?.let { 
+            Log.d(TAG, "Got root from rootInActiveWindow")
+            return it 
+        }
+        
+        // Strategy 2: Use cached node
+        if (lastKnownRootNode != null && 
+            System.currentTimeMillis() - lastUpdateTime < CACHE_VALIDITY_MS) {
+            Log.d(TAG, "Got root from cache")
+            return lastKnownRootNode
+        }
+        
+        // Strategy 3: Get from all windows (Android 5.1+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            tryGetFromAllWindows()?.let { 
+                Log.d(TAG, "Got root from windows list")
+                return it 
+            }
+        }
+        
+        // Strategy 4: Retry with delay (sometimes window switching takes time)
+        for (i in 1..3) {
+            Thread.sleep(100)
+            rootInActiveWindow?.let { 
+                Log.d(TAG, "Got root after retry $i")
+                return it 
+            }
+        }
+        
+        Log.w(TAG, "All strategies failed to get root node")
+        return null
+    }
+    
+    /**
+     * Try to get root node from all windows (Android 5.1+)
+     * Inspired by browser-use's approach to handle multiple contexts
+     */
+    private fun tryGetFromAllWindows(): AccessibilityNodeInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
+            return null
+        }
+        
+        return try {
+            val windowList = windows
+            if (windowList.isEmpty()) {
+                return null
+            }
+            
+            // Priority: Find active window with content
+            for (window in windowList) {
+                if (window.isActive) {
+                    val root = window.root
+                    if (root != null && root.childCount > 0) {
+                        return root
+                    }
+                }
+            }
+            
+            // Fallback: Return first window with content
+            for (window in windowList) {
+                val root = window.root
+                if (root != null && root.childCount > 0) {
+                    return root
+                }
+            }
+            
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get from all windows: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Diagnose why no window is available
+     */
+    private fun diagnoseNoWindow(): String {
+        val sb = StringBuilder()
+        
+        // Check service status
+        sb.append("Service enabled: ${instance != null}; ")
+        
+        // Check cache
+        sb.append("Cache: ${if (lastKnownRootNode != null) "valid" else "empty"}; ")
+        
+        // Check window list
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            try {
+                val windowCount = windows.size
+                sb.append("Windows: $windowCount; ")
+            } catch (e: Exception) {
+                sb.append("Windows: error; ")
+            }
+        }
+        
+        // Check if device is locked
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            sb.append("Locked: ${keyguardManager.isDeviceLocked}")
+        }
+        
+        return sb.toString()
+    }
+    
+    /**
+     * Execute command
      */
     fun executeCommand(command: ExecuteCommand): CommandResult {
         return when (command.action) {
@@ -71,7 +247,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 点击坐标
+     * Tap at coordinates
      */
     private fun executeTap(command: ExecuteCommand): CommandResult {
         val x = command.params.optInt("x", -1)
@@ -93,7 +269,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 点击元素
+     * Tap element
      */
     private fun executeTapElement(command: ExecuteCommand): CommandResult {
         val text = command.params.optString("text", null)
@@ -131,7 +307,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 滑动
+     * Swipe gesture
      */
     private fun executeSwipe(command: ExecuteCommand): CommandResult {
         val startX = command.params.optInt("startX", 0)
@@ -153,7 +329,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 长按
+     * Long press
      */
     private fun executeLongPress(command: ExecuteCommand): CommandResult {
         val x = command.params.optInt("x", -1)
@@ -176,14 +352,15 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 输入文本
+     * Input text
      */
     private fun executeInputText(command: ExecuteCommand): CommandResult {
         val text = command.params.optString("text", "")
         
-        val rootNode = rootInActiveWindow ?: return CommandResult.error("No active window")
+        val rootNode = getRootNode() 
+            ?: return CommandResult.error("No active window - ${diagnoseNoWindow()}")
         
-        // 查找当前焦点的可编辑节点
+        // Find focusable editable node
         val focusNode = findFocusableNode(rootNode)
         
         if (focusNode == null) {
@@ -204,7 +381,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 按键事件
+     * Key event
      */
     private fun executeKeyEvent(command: ExecuteCommand): CommandResult {
         val keyCode = command.params.optInt("keyCode", 0)
@@ -222,7 +399,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 返回
+     * Back action
      */
     private fun executeBack(): CommandResult {
         val result = performGlobalAction(GLOBAL_ACTION_BACK)
@@ -234,7 +411,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * Home
+     * Home action
      */
     private fun executeHome(): CommandResult {
         val result = performGlobalAction(GLOBAL_ACTION_HOME)
@@ -246,7 +423,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 最近任务
+     * Recent apps
      */
     private fun executeRecent(): CommandResult {
         val result = performGlobalAction(GLOBAL_ACTION_RECENTS)
@@ -258,7 +435,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 通知栏
+     * Notifications panel
      */
     private fun executeNotifications(): CommandResult {
         val result = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
@@ -270,7 +447,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 快速设置
+     * Quick settings panel
      */
     private fun executeQuickSettings(): CommandResult {
         val result = performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
@@ -282,7 +459,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 向前滚动
+     * Scroll forward
      */
     private fun executeScrollForward(command: ExecuteCommand): CommandResult {
         val text = command.params.optString("text", null)
@@ -307,7 +484,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 向后滚动
+     * Scroll backward
      */
     private fun executeScrollBackward(command: ExecuteCommand): CommandResult {
         val text = command.params.optString("text", null)
@@ -332,7 +509,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 查找元素
+     * Find element
      */
     private fun executeFindElement(command: ExecuteCommand): CommandResult {
         val text = command.params.optString("text", null)
@@ -357,18 +534,30 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 获取界面层级结构
+     * Get UI hierarchy - Enhanced version with multiple fallback strategies
+     * Inspired by browser-use's multi-data-source approach
      */
     private fun executeDumpHierarchy(): CommandResult {
-        val rootNode = rootInActiveWindow ?: return CommandResult.error("No active window")
+        val rootNode = getRootNode()
         
-        val hierarchy = NodeInfoExtractor.extractHierarchy(rootNode)
+        if (rootNode == null) {
+            val diagnosis = diagnoseNoWindow()
+            Log.e(TAG, "executeDumpHierarchy failed: $diagnosis")
+            return CommandResult.error("No active window - Diagnosis: $diagnosis")
+        }
         
-        return CommandResult.success("Hierarchy dumped", hierarchy)
+        try {
+            // Enhanced extraction with visibility detection
+            val hierarchy = NodeInfoExtractor.extractHierarchyWithVisibility(rootNode)
+            return CommandResult.success("Hierarchy dumped", hierarchy)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract hierarchy: ${e.message}")
+            return CommandResult.error("Failed to extract hierarchy: ${e.message}")
+        }
     }
     
     /**
-     * 同步执行手势
+     * Dispatch gesture synchronously
      */
     private fun dispatchGestureSync(gesture: GestureDescription): CommandResult {
         var result = false
@@ -402,7 +591,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 查找节点
+     * Find nodes - Updated to use getRootNode()
      */
     private fun findNodes(
         text: String?,
@@ -410,7 +599,7 @@ class BridgeAccessibilityService : AccessibilityService() {
         desc: String?,
         className: String?
     ): List<AccessibilityNodeInfo> {
-        val rootNode = rootInActiveWindow ?: return emptyList()
+        val rootNode = getRootNode() ?: return emptyList()
         val result = mutableListOf<AccessibilityNodeInfo>()
         
         findNodesRecursive(rootNode, text, resourceId, desc, className, result)
@@ -428,7 +617,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     ) {
         var match = true
         
-        if (text != null && !text.isNullOrEmpty()) {
+        if (text != null && text.isNotEmpty()) {
             val nodeText = node.text?.toString() ?: ""
             val contentDesc = node.contentDescription?.toString() ?: ""
             if (!nodeText.contains(text, ignoreCase = true) && 
@@ -437,21 +626,21 @@ class BridgeAccessibilityService : AccessibilityService() {
             }
         }
         
-        if (resourceId != null && !resourceId.isNullOrEmpty()) {
+        if (resourceId != null && resourceId.isNotEmpty()) {
             val nodeId = node.viewIdResourceName ?: ""
             if (!nodeId.contains(resourceId, ignoreCase = true)) {
                 match = false
             }
         }
         
-        if (desc != null && !desc.isNullOrEmpty()) {
+        if (desc != null && desc.isNotEmpty()) {
             val nodeDesc = node.contentDescription?.toString() ?: ""
             if (!nodeDesc.contains(desc, ignoreCase = true)) {
                 match = false
             }
         }
         
-        if (className != null && !className.isNullOrEmpty()) {
+        if (className != null && className.isNotEmpty()) {
             val nodeClass = node.className?.toString() ?: ""
             if (!nodeClass.contains(className, ignoreCase = true)) {
                 match = false
@@ -462,7 +651,7 @@ class BridgeAccessibilityService : AccessibilityService() {
             result.add(node)
         }
         
-        // 递归遍历子节点
+        // Recursively traverse child nodes
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
             if (child != null) {
@@ -472,7 +661,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * 查找可编辑焦点节点
+     * Find editable focusable node
      */
     private fun findFocusableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         if (node.isEditable && node.isEnabled) {
